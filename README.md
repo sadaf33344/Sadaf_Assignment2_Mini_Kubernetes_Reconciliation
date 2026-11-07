@@ -1,353 +1,222 @@
-# Unit 2: Declarative Infrastructure & Mini-K8s Reconciliation
 
-Welcome to **Unit 2** of COSC 3657 (Distributed Systems). In this lab, you transition from writing low-level imperative sockets to operating as a **Platform Engineer**.
+# COSC 3657 — Unit 2: Mini-Kubernetes Reconciliation Controller
 
-Rather than issuing manual, one-off deployment commands that fail when nodes crash or network partitions occur, you will build a **declarative, self-healing control plane**. You will define custom domain abstractions using **Custom Resource Definitions (CRDs)** and write an active **Reconciliation Controller** in Python. This controller continuously observes cluster state, computes drift against user-declared specifications, and executes idempotent API operations to enforce system equilibrium under partial node failures.
+**Project:** Mini-Kubernetes Reconciliation Controller  
+**Course:** COSC 3657 — Distributed Systems  
+**Implementation:** Python and Kubernetes  
+**Test environment:** Windows, VS Code, WSL 2, Docker Desktop, and a local single-node `kind`-type Kubernetes cluster
 
----
+## 1. Project overview
 
-## 📚 CDK5 Textbook Theoretical Alignment
+This project implements a small Kubernetes-style reconciliation controller in Python. The user declares the **desired state** of an application in a Kubernetes custom resource, and the controller compares that state with the **actual state** of the running Pods. When the numbers differ, it creates or removes Pods until they match. The controller also detects when Pods use an outdated container image and replaces them.
 
-This project operationalizes core theoretical concepts from *Distributed Systems: Concepts and Design (5th Edition)* (Coulouris, Dollimore, Kindberg, and Blair).
+For example, if the desired state is three Pods but only two exist, the controller detects a **drift of +1** and creates one replacement. When the actual and desired counts are the same, the system has reached **equilibrium**.
 
-| Project Component | Distributed Systems Core Concept | Primary Textbook Reference |
-| --- | --- | --- |
-| **Cluster Topology (`kind`)** | Architectural & Physical Models, Platform vs. Middleware Abstractions | **CDK5 Sections 2.1 & 2.2** |
-| **CRD Schema (`crd_definition.yaml`)** | Abstract System State Representation, Extensible Interfaces | **CDK5 Sections 1.5 & 5.2** |
-| **Resource Manifest (`sample_cr.yaml`)** | Declarative Intent vs. Imperative Execution Models | **CDK5 Section 2.2** |
-| **Reconciler Loop (`reconciler.py`)** | Continuous Convergence, Idempotent Remote Invocation ($f(f(x)) = f(x)$) | **CDK5 Section 5.2** |
-| **Chaos Tester / Pod Eviction** | Crash-Stop Failure Model, Fail-Silent Omission, Autonomic Self-Healing | **CDK5 Section 2.4** |
+The main objective is to demonstrate the Kubernetes controller pattern, event watching, declarative management, drift calculation, idempotent reconciliation, and recovery from Pod deletion.
 
----
+## 2. Files in this repository
 
-## 🛠️ Declarative Control Loop Architecture
+| File | Purpose |
+| --- | --- |
+| `reconciler.py` | The Python reconciliation controller: watches events, checks drift, creates/deletes Pods, and handles image changes. |
+| `crd_definition.yaml` | Registers the `ResilientDeployment` custom resource type with Kubernetes. |
+| `sample_cr.yaml` | Defines the `echo-service` application, desired replica count, and container image. |
+| `README.md` | Explains project setup, commands, code behavior, tests, and evidence. |
+| `AIA-Artificial-Intelligence-Aided.png` | AI-assistance disclosure badge supplied with the course materials. |
+| `Screenshots/` | Screenshot evidence of controller tests. Keep screenshots in this folder before submitting to GitHub. |
 
-In an imperative workflow, operational scripts execute steps sequentially (e.g., `create_server_1()`, `create_server_2()`). If a network failure interrupts execution mid-script, the system is left in an inconsistent state.
+## 3. How the controller works
 
-In contrast, our custom controller implements a **Continuous Reconciliation Control Loop**:
+1. The controller uses the Python Kubernetes client to connect to the current cluster using the local kubeconfig.
+2. It reads the `ResilientDeployment` custom resource in the `default` namespace.
+3. It finds Pods labeled `app.kubernetes.io/managed-by=echo-service` and excludes Pods being deleted and Pods whose phase is `Failed` or `Succeeded`.
+4. It calculates **drift = desired replica count − observed active Pod count**.
+5. If drift is positive, the controller creates missing Pods. If drift is negative, it removes extra Pods, choosing the newest Pods first.
+6. If the counts match, it checks each Pod's image against the desired image. It deletes Pods using an outdated image so they can be replaced.
+7. Watch threads listen for Pod and custom-resource changes. The main loop also checks again after a one-second timeout.
+8. When there are no required changes, the controller takes no action. This is the **idempotent** behavior expected from a reconciliation loop.
 
-```text
-       +---------------------------------------------------+
-       |                                                   |
-       v                                                   |
-[ Observe Live State ] ---> [ Compute State Drift ] ---> [ Reconcile ]
-  (Query Pod API)             (Delta = Desired - Actual)    (Create/Delete Pods)
+### Important Python functions
 
-```
+- `create_pod()` creates a Pod with a generated name, identifying labels, an owner reference, and the requested container image.
+- `reconcile_all()` calculates drift and performs scale-up, scale-down, or image replacement.
+- `watch_for_changes()` listens for API events and signals that the controller should check the state again.
+- `main()` connects to Kubernetes, starts the two watcher threads, and runs the reconciliation loop until stopped with **Ctrl+C**.
 
-1. **Desired State ($N_{\text{desired}}$):** Parsed from the user's `ResilientDeployment` manifest stored in `etcd`.
+## 4. Requirements and local environment
 
+- Windows with **WSL 2** enabled
+- **Docker Desktop** running with a working Kubernetes cluster
+- **Python 3** and the Python Kubernetes client (`pip install kubernetes`)
+- **kubectl** available in the VS Code PowerShell terminal
+- A local kubeconfig pointing to the cluster being tested
 
-2. **Observed State ($N_{\text{observed}}$):** Discovered by querying active, running pods matching the resource label.
+The implementation was tested with Docker Desktop's built-in **single-node `kind`-type cluster**, showing one Ready control-plane node. Docker Desktop's Kubernetes version shown during testing was **v1.36.1**. The cluster was created through the Docker Desktop interface rather than through `kind create cluster --name cosc3657-unit2`.
 
+**Note about the course guide:** The handout describes a “multi-node” cluster but gives the command `kind create cluster --name cosc3657-unit2`. With no additional configuration, that command also creates a **single-node** cluster by default. A true multi-node kind cluster requires an explicit node configuration. The local cluster in this project is documented as single-node, not multi-node.
 
-3. **State Drift ($\Delta$):** Calculated continuously as:
+To check that Docker and Kubernetes are available:
 
-$$\Delta = N_{\text{desired}} - N_{\text{observed}}$$
-
-* If $\Delta > 0$: The controller provisions $\Delta$ replacement pods.
-* If $\Delta < 0$: The controller prunes $\vert{}\Delta\vert{}$ excess pods.
-* If $\Delta = 0$: The cluster is in **Equilibrium**.
-
----
-
-## 📁 Repository Structure
-
-```text
-fw26-unit2-student/
-├── crd_definition.yaml         # Kubernetes Custom Resource Definition schema
-├── sample_cr.yaml              # Custom Resource declarative intent manifest
-├── reconciler.py               # Active Reconciliation Controller (or reconciler in your preferred language) implementation
-└── README.md                   # Project documentation & instructions
-
-```
-
----
-
-## 🚀 Quick Start Instructions
-
-### Install Docker, Kind and kubectl to your OS as per the section [Host Prerequisites & Quick Tooling Installation Guide](#host-prerequisites-and-quick-tooling-installation-guide)
-
-### Install python libraries if python is chosen for this project.
-
-```bash
-python3 -m venv venv && source venv/bin/activate
-pip install kubernetes rich pyyaml
-
-```
-
----
-
-## 🧪 Step-by-Step Testing & Verification Instructions
-
-### Step 1: Provision Local Kubernetes Cluster
-
-Inside the integrated terminal, spin up a multi-node `kind` cluster:
-
-```bash
-kind create cluster --name cosc3657-unit2
-
-```
-
-Verify that `kubectl` is connected to your local cluster:
-
-```bash
+```powershell
+docker info
 kubectl get nodes
-
+kubectl get pods -A
 ```
 
-### Step 2: Register the Custom Resource Definition (CRD)
+The system Pods were verified in the `Running` state. The single node showed `Ready`.
 
-Apply `crd_definition.yaml` to register the `ResilientDeployment` schema with the API server:
+## 5. Setup and run the project
 
-```bash
+Open the project folder in VS Code and use its integrated PowerShell terminal. Make sure Docker Desktop and its Kubernetes cluster are running.
+
+### Step 1 — Register the custom resource definition
+
+```powershell
 kubectl apply -f crd_definition.yaml
-
-```
-
-Verify registration:
-
-```bash
 kubectl get crd resilientdeployments.cosc3657.tu.ca
-
 ```
 
-### Step 3: Launch the Reconciliation Controller
+The apply command was observed to create `resilientdeployments.cosc3657.tu.ca` successfully. The separate `get crd` verification command is included because it appears in the professor's instructions.
 
-In Terminal 1, run the controller:
+### Step 2 — Apply the sample custom resource
 
-```bash
+```powershell
+kubectl apply -f sample_cr.yaml
+kubectl get resilientdeployment echo-service -o yaml
+```
+
+The project uses the custom resource name **`echo-service`**. The professor's sample logs use `echo-cluster`; the different name is intentional and must be kept consistent with this project's YAML and commands.
+
+To reproduce the *initial* test, use the following desired values in `sample_cr.yaml`:
+
+```yaml
+apiVersion: cosc3657.tu.ca/v1alpha1
+kind: ResilientDeployment
+metadata:
+  name: echo-service
+  namespace: default
+spec:
+  replicas: 3
+  image: hashicorp/http-echo:latest
+```
+
+**Current test state:** After subsequent tests, `sample_cr.yaml` was changed to **2 replicas** with image **`nginx:alpine`**. This change was deliberate for testing and is not the initial three-replica example.
+
+### Step 3 — Start the controller in Terminal 1
+
+```powershell
 python reconciler.py
-
 ```
 
-*Expected Output:*
+Expected startup message:
 
 ```text
 === COSC 3657 Custom Kubernetes Reconciler Started ===
-
 ```
 
-### Step 4: Apply Declarative Intent Manifest
+Keep this terminal running. In a second terminal, check the application Pods:
 
-Open a split terminal (`Ctrl+Shift+\``) and apply `sample_cr.yaml`:
-
-```bash
-kubectl apply -f sample_cr.yaml
-
+```powershell
+kubectl get pods -l app.kubernetes.io/managed-by=echo-service
 ```
 
-Observe Terminal 1. The reconciler detects $\Delta = +3$ and provisions 3 pods automatically:
+## 6. Tests and observed results
+
+| Test | Action | Observed outcome | Status |
+| --- | --- | --- | --- |
+| Initial reconciliation | Applied a custom resource requesting 3 Pods | 3 Pods created; final `Desired: 3`, `Observed: 3`, `Drift: 0` | **Passed** |
+| Automatic recovery after normal deletion | Deleted `echo-service-pv48g` using a normal `kubectl delete pod` | Reconciler detected 2 instead of 3 Pods and created `echo-service-rwr24`; returned to 3 Pods | **Passed** |
+| Scale-up | Changed replicas from 3 to 5 and re-applied `sample_cr.yaml` | 2 additional Pods created; final `Desired: 5`, `Observed: 5`, `Drift: 0` | **Passed** |
+| Scale-down | Changed replicas from 5 to 2 and re-applied `sample_cr.yaml` | 3 extra Pods removed; final `Desired: 2`, `Observed: 2`, `Drift: 0` | **Passed** |
+| Container image change | Changed image from `hashicorp/http-echo:latest` to `nginx:alpine` with 2 replicas | `[UPDATE]` message, old Pods removed, and 2 replacements created; new Pods reported running | **Passed** |
+| **Forced deletion and self-healing** | Force-deleted Pod `echo-service-5rxdg` with `--grace-period=0 --force` | Reconciler detected `Desired: 2`, `Observed: 1`, `Drift: 1`, created `echo-service-9l5kv`, and returned to `Drift: 0`; both Pods running | **Passed** |
+
+### Evidence from the controller
+
+The normal-deletion recovery test produced the following sequence:
 
 ```text
-[RECONCILE LOOP] Resource: echo-cluster | Desired: 3 | Observed: 0 | Drift: 3
-Scale-Up Event: Provisioning 3 pod(s) to resolve drift...
-EQUILIBRIUM REACHED: System state matches target spec for 'echo-cluster'.
-
+[RECONCILE LOOP] Resource: echo-service | Desired: 3 | Observed: 2 | Drift: 1
+Scale-Up Event: Creating 1 Pod(s)...
+[CREATE] echo-service-rwr24
+[RECONCILE LOOP] Resource: echo-service | Desired: 3 | Observed: 3 | Drift: 0
+EQUILIBRIUM REACHED for echo-service.
 ```
 
-Verify pod creation in Terminal 2:
+The scale-down and image-update logs showed the same basic process: detect the difference, take corrective action, and return to **drift 0**. The forced-deletion test followed this same pattern.
 
-```bash
-kubectl get pods -l app.kubernetes.io/managed-by=echo-cluster
+### Forced-deletion test (passed)
 
-```
+The professor specifically asks for a forced Pod deletion rather than only a normal deletion. This test was completed in the local cluster. In PowerShell, I selected one Pod managed by `echo-service` and deleted it with no grace period:
 
-### Step 5: Fault Injection & Self-Healing Verification
-
-Simulate an unannounced process crash under the **Crash-Stop Failure Model** by forcibly deleting a running pod:
-
-```bash
-kubectl delete pod $(kubectl get pods -l app.kubernetes.io/managed-by=echo-cluster -o jsonpath='{.items[0].metadata.name}') --grace-period=0 --force
-
-```
-
-Watch Terminal 1. Within 2 seconds, the controller registers $\Delta = +1$ and recreates a replacement pod automatically to restore target equilibrium.
-
-### Step 6: Test Declarative Scale Mutation
-
-Mutate the desired replica count from `3` to `5` without restarting the controller:
-
-```bash
-kubectl patch resilientdeployment echo-cluster --type='json' -p='[{"op": "replace", "path": "/spec/replicas", "value": 5}]'
-
-```
-
-*Expected Output in Terminal 1:* The controller detects $\Delta = +2$ and scales up 2 additional pods.
-
----
-
-## 📝 Student Deliverables Checklist
-
-* [ ] Create your own Mini-K8s cluster and apply the provided custom resource definition `crd_definition.yaml`.
-* [ ] Complete implementation of `reconciler.py` (or in any other your preferred language) so it can handle watch events, calculating drift, and performing idempotent scale operations.
-* [ ] Terminal screenshot/log recording demonstrating that forcibly deleting a pod via `kubectl delete pod --force` causes the reconciler to automatically provision a replacement pod.
-* [ ] Record the presentation of your code, also explain what challenges encountered and overcomed, as well as how AI used to help this project if AI is used.
-* [ ] Submit your github repository with the completed code.
-
----
-
-## 📖 Related Reference Documents
-
-If you are new to Kubernetes or cloud-native control planes, review these curated resources alongside the CDK5 textbook readings to build a strong foundation.
-
-### 1. Fundamental Kubernetes Architecture & Concepts
-
-* **[Kubernetes Components Overview](https://kubernetes.io/docs/concepts/overview/components/):** Understand the division between the **Control Plane** (`kube-apiserver`, `etcd`) and **Worker Nodes** (`kubelet`, `container runtime`).
-
-
-* **[Kubernetes Pod Lifecycle](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/):** Learn how pods transition through states (`Pending`, `Running`, `Failed`, `Terminating`), which our reconciler evaluates during state drift calculation.
-
-
-* **[Declarative Management vs. Imperative Commands](https://kubernetes.io/docs/tasks/manage-kubernetes-objects/declarative-config/):** Understand why managing state through configuration files (`YAML`) provides resilience compared to one-off imperative shell scripts.
-
-
-
-### 2. Custom Resources & The Controller Pattern
-
-* **[Custom Resources & CRDs Explained](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/):** Learn how Custom Resource Definitions extend the base Kubernetes API schema with custom domain models.
-
-
-* **[The Kubernetes Controller Pattern](https://kubernetes.io/docs/concepts/architecture/controller/):** Read the official guide on reconciliation loops and how background controllers continuously work to drive actual cluster state toward declared target state.
-
-
-* **[Operator Pattern Design Principles](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/):** Learn how real-world platform operators automate state management and fault recovery.
-
-
-
-### 3. Client Libraries & Local Tooling
-
-* **[Python Client for Kubernetes (`kubernetes-client`)](https://github.com/kubernetes-client/python):** Reference documentation for interacting with `CustomObjectsApi` and `CoreV1Api` in Python[cite: 8].
-* **[Python Watch API Example](https://www.google.com/search?q=https://github.com/kubernetes-client/python/blob/master/examples/watch/pod_watch.py):** See how to stream live API server events asynchronously instead of polling[cite: 8].
-* **[Kind (Kubernetes in Docker) Quick Start](https://kind.sigs.k8s.io/docs/user/quick-start/):** Guide on how `kind` provisions multi-node Kubernetes clusters inside local Docker containers[cite: 5, 8].
-* **[kubectl Cheat Sheet](https://kubernetes.io/docs/reference/kubectl/cheatsheet/):** Quick reference for `kubectl get`, `kubectl apply`, `kubectl delete`, and JSONPath field filtering[cite: 8].
-
-
-## Host Prerequisites and Quick Tooling Installation Guide
-
-Use the quick-start commands below to install Docker, `kubectl`, and `kind` across **macOS**, **Windows**, or **Ubuntu Linux** for setting up your local environment outside or alongside Dev Containers.
-
----
-
-### 🍎 macOS Quick Start
-
-Install all dependencies using [Homebrew](https://brew.sh/):
-
-```bash
-# 1. Install Docker Desktop
-brew install --cask docker
-
-# 2. Install Kubernetes CLI and Kind
-brew install kubectl kind
-
-```
-
-> **Note:** Launch **Docker.app** from your `Applications` folder after installation to initialize the container daemon.
-
----
-
-### 🪟 Windows Quick Start
-
-Execute the following commands in **PowerShell (Run as Administrator)**:
-
-1. **Enable WSL 2 (Required for Docker Engine):**
 ```powershell
-wsl --install
-
+$pod = kubectl get pods -l "app.kubernetes.io/managed-by=echo-service" -o jsonpath="{.items[0].metadata.name}"
+kubectl delete pod $pod --grace-period=0 --force
+kubectl get pods -l "app.kubernetes.io/managed-by=echo-service"
 ```
 
+The terminal reported `pod "echo-service-5rxdg" force deleted from default namespace`. The controller log then showed:
 
-*(Restart your machine if prompted before proceeding).*
-2. **Install Docker Desktop, `kubectl`, and `kind`:**
-* **Option A: Using `winget` (Built-in Package Manager)**
-```powershell
-winget install Docker.DockerDesktop
-winget install Kubernetes.kubectl
-winget install Kubernetes.kind
-
+```text
+[RECONCILE LOOP] Resource: echo-service | Desired: 2 | Observed: 1 | Drift: 1
+Scale-Up Event: Creating 1 Pod(s)...
+[CREATE] echo-service-9l5kv
+[RECONCILE LOOP] Resource: echo-service | Desired: 2 | Observed: 2 | Drift: 0
+EQUILIBRIUM REACHED for echo-service.
 ```
 
+A subsequent Pod listing showed two Pods in `Running` status. This verifies the required automatic recovery from forced deletion. Evidence is available in the terminal screenshots of the deletion command and reconciler logs.
 
-* **Option B: Using `chocolatey**`
-```powershell
-choco install docker-desktop kubernetes-cli kind
+### Declarative scale test in the professor's instructions
 
-```
+The professor's example uses a `kubectl patch` command to change replicas from 3 to 5. This project already demonstrated the **same declarative scaling behavior** by editing `sample_cr.yaml` and applying it with `kubectl apply -f sample_cr.yaml`, without restarting `reconciler.py`. If the exact patch command is required, that should be demonstrated separately.
 
+## 7. Screenshot evidence
 
+Screenshots recorded during development include initial Pod creation, normal deletion and replacement, scaling up and down, image updates, and the required forced-deletion recovery. Use the actual saved filenames and put the PNGs in the project's `Screenshots/` folder before uploading to GitHub. Suggested filenames:
 
+- `Reconciliation_Test_Results.png` — earlier self-healing and scaling controller logs
+- `Pod_Image_Before_Update.png` — original `hashicorp/http-echo:latest` image
+- `Pod_Image_After_Update.png` — updated image `nginx:alpine`, if saved
+- `Image_Update_Reconciler_Log.png` — image replacement and equilibrium
+- `Forced_Deletion_Recovery_Test.png` — Python log showing forced deletion detected and a replacement created
+- `Forced_Deletion_Command.png` — optional extra evidence showing `--force` deletion command and two Pods running; useful if available
 
+The forced-deletion test is verified by the command output and reconciler screenshots. If only one screenshot is submitted, prioritize the reconciler log; the command screenshot gives clearer proof that `--force` was used.
 
-> **Note:** Open **Docker Desktop**, navigate to **Settings $\rightarrow$ General**, and ensure **"Use the WSL 2 based engine"** is enabled.
+## 8. Challenges encountered and solutions
+
+| Challenge | What I did |
+| --- | --- |
+| Docker Desktop could not start because virtualization-related Windows features were disabled | Enabled **Virtual Machine Platform** and **Windows Subsystem for Linux**, then restarted Windows and updated WSL. |
+| Docker commands were not initially recognized in VS Code | Restarted VS Code after installing Docker Desktop, then verified `docker --version` and `docker info`. |
+| YAML parsing error while changing replicas | Corrected the YAML indentation so `replicas:` and `image:` aligned under `spec:`, saved, and re-applied the file. |
+| Needed to show that the controller actually repaired failures | Checked both the controller log and `kubectl get pods` output to demonstrate Pod replacement and `Drift: 0`. |
+| Needed to understand reconciliation | Used `Desired`, `Observed`, and `Drift` values in the logs to connect the code to its actual behavior. |
+
+## 9. AI assistance disclosure
+
+AI assistance was used to explain Kubernetes concepts in beginner-friendly language, interpret error messages and terminal results, help troubleshoot WSL 2/Docker Desktop setup, review the Python controller logic, plan test commands, and organize README documentation and the video presentation. I checked the suggested steps in my own local environment, ran the commands, and reviewed the observed controller output. The video presentation will also explain these uses and the challenges encountered.
+
+![AI-assisted project badge](AIA-Artificial-Intelligence-Aided.png)
+
+## 10. Student deliverables checklist
+
+- [x] Create a local Mini-Kubernetes cluster and apply `crd_definition.yaml`.
+- [x] Implement `reconciler.py` with watch events, drift calculation, and idempotent scale operations.
+- [x] Capture terminal evidence that a **forced** Pod deletion (`--force`) triggers automatic replacement.
+- [ ] Record the code presentation, including challenges, solutions, and the use of AI.
+- [ ] Push and submit the completed GitHub repository.
+
+## 11. References
+
+- [Kubernetes components](https://kubernetes.io/docs/concepts/overview/components/)
+- [Kubernetes Pods and Pod lifecycle](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/)
+- [Custom resources and CRDs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
+- [Kubernetes controller pattern](https://kubernetes.io/docs/concepts/architecture/controller/)
+- [Kubernetes Python client](https://github.com/kubernetes-client/python)
+- [kind quick start](https://kind.sigs.k8s.io/docs/user/quick-start/)
 
 ---
 
-### 🐧 Ubuntu Linux Quick Start
-
-Execute the following commands in your terminal (Ubuntu 20.04 / 22.04 / 24.04 LTS):
-
-1. **Install Docker Engine & Configure Non-Root Permissions:**
-```bash
-sudo apt-get update && sudo apt-get install -y ca-certificates curl gnupg docker.io
-sudo usermod -aG docker $USER
-newgrp docker
-
-```
-
-
-2. **Install `kubectl` Binary:**
-```bash
-curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-rm kubectl
-
-```
-
-
-3. **Install Architecture-Aware `kind` Binary:**
-```bash
-ARCH=$(uname -m)
-if [ "$ARCH" = "x86_64" ]; then KIND_ARCH="amd64"; else KIND_ARCH="arm64"; fi
-curl -Lo ./kind "https://kind.sigs.k8s.io/dl/v0.22.0/kind-linux-${KIND_ARCH}"
-chmod +x ./kind
-sudo mv ./kind /usr/local/bin/kind
-
-```
-
-
-
----
-
-### 🧪 Tooling Verification Check
-
-Execute these commands in your host terminal to verify that all components are operational before creating your cluster:
-
-1. **Verify Container Runtime:**
-```bash
-docker run --rm hello-world
-
-```
-
-
-2. **Verify CLI Tool Versions:**
-```bash
-kubectl version --client
-kind --version
-
-```
-
-
-3. **Test Cluster Provisioning:**
-```bash
-kind create cluster --name quickstart-test
-kubectl get nodes
-kind delete cluster --name quickstart-test
-
-```
-
----
-
-
-**Artificial Intelligence Aided**
-
-<img src="./AIA-Artificial-Intelligence-Aided.png" alt="AI-aided" width="80">
+**Project status as documented:** The controller and all functional tests (including the required forced-deletion recovery) passed. The **recorded presentation** and **GitHub repository submission** remain before final submission; confirm screenshots are in `Screenshots/`.
