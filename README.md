@@ -203,15 +203,9 @@ I personally set up the Kubernetes environment, ran the program, performed the t
 
 ![AI-assisted project badge](AIA-Artificial-Intelligence-Aided.png)
 
-## 10. Student deliverables checklist
 
-- [x] Create a local Mini-Kubernetes cluster and apply `crd_definition.yaml`.
-- [x] Implement `reconciler.py` with watch events, drift calculation, and idempotent scale operations.
-- [x] Capture terminal evidence that a **forced** Pod deletion (`--force`) triggers automatic replacement.
-- [ ] Record the code presentation, including challenges, solutions, and the use of AI.
-- [ ] Push and submit the completed GitHub repository.
 
-## 11. References
+## 10. References
 
 - [Kubernetes components](https://kubernetes.io/docs/concepts/overview/components/)
 - [Kubernetes Pods and Pod lifecycle](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/)
@@ -221,5 +215,3 @@ I personally set up the Kubernetes environment, ran the program, performed the t
 - [kind quick start](https://kind.sigs.k8s.io/docs/user/quick-start/)
 
 ---
-
-**Project status as documented:** The controller and all functional tests (including the required forced-deletion recovery) passed. The **recorded presentation** and **GitHub repository submission** remain before final submission; confirm screenshots are in `Screenshots/`.
