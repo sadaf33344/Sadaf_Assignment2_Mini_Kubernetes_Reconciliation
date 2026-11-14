@@ -194,9 +194,12 @@ The forced-deletion test is verified by the command output and reconciler screen
 | Needed to show that the controller actually repaired failures | Checked both the controller log and `kubectl get pods` output to demonstrate Pod replacement and `Drift: 0`. |
 | Needed to understand reconciliation | Used `Desired`, `Observed`, and `Drift` values in the logs to connect the code to its actual behavior. |
 
-## 9. AI assistance disclosure
 
-AI assistance was used to explain Kubernetes concepts in beginner-friendly language, interpret error messages and terminal results, help troubleshoot WSL 2/Docker Desktop setup, review the Python controller logic, plan test commands, and organize README documentation and the video presentation. I checked the suggested steps in my own local environment, ran the commands, and reviewed the observed controller output. The video presentation will also explain these uses and the challenges encountered.
+## 9. AI Assistance Disclosure
+
+I used AI as a learning and development support tool during this assignment. It helped me understand Kubernetes concepts, write and improve parts of the Python controller, troubleshoot technical problems, and organize my documentation.
+
+I personally set up the Kubernetes environment, ran the program, performed the tests, and verified the results. AI provided guidance throughout the project, while I used practical testing to understand and confirm how the system worked.
 
 ![AI-assisted project badge](AIA-Artificial-Intelligence-Aided.png)
 
